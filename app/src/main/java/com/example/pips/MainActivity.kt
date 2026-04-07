@@ -15,15 +15,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -31,7 +29,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -44,6 +47,18 @@ import androidx.core.content.ContextCompat
 import com.example.pips.ui.theme.PIPSTheme
 import java.text.SimpleDateFormat
 import java.util.*
+
+enum class TimeGranularity {
+    DAILY, WEEKLY, MONTHLY, YEARLY
+}
+
+data class ChartDataPoint(
+    val label: String,
+    val amount: Double,
+    val budget: Double,
+    val date: Date,
+    val isOver: Boolean
+)
 
 class MainActivity : ComponentActivity() {
     
@@ -129,10 +144,10 @@ class MainActivity : ComponentActivity() {
                                 Text(
                                     text = when {
                                         settingsSubScreen != null -> settingsSubScreen!!.replace("_", " ").replaceFirstChar { it.uppercase() }
-                                        currentScreen == "analytics" -> "Spending Analytics"
+                                        currentScreen == "analytics" -> "Analytics & Trends"
                                         currentScreen == "notifications" -> "Notification History"
                                         currentScreen == "settings" -> "Settings"
-                                        else -> "PIPS - UPI Tracker"
+                                        else -> "PIPS"
                                     },
                                     modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.titleLarge,
@@ -274,95 +289,372 @@ fun AnalyticsScreen(refreshTrigger: Int) {
     val budgets = remember(refreshTrigger) { prefs.getBudgets() }
     val budgetEnabled = remember(refreshTrigger) { prefs.isBudgetEnabled() }
 
-    val calendar = Calendar.getInstance()
-    val currentMonth = calendar.get(Calendar.MONTH)
-    val currentYear = calendar.get(Calendar.YEAR)
+    var granularity by remember { mutableStateOf(TimeGranularity.MONTHLY) }
+    var periodCount by remember { mutableIntStateOf(6) }
+    var selectedCategoryForChart by remember { mutableStateOf("All") }
 
-    val currentMonthTransactions = transactions.filter {
-        val transCal = Calendar.getInstance().apply { timeInMillis = it.timestamp }
-        transCal.get(Calendar.MONTH) == currentMonth && transCal.get(Calendar.YEAR) == currentYear
+    val chartData = remember(transactions, granularity, periodCount, selectedCategoryForChart, budgets, budgetEnabled) {
+        prepareChartData(transactions, granularity, periodCount, selectedCategoryForChart, budgets, budgetEnabled)
     }
-
-    val totalSpent = currentMonthTransactions.sumOf { it.amount }
-    val categoryTotals = categories.associateWith { category ->
-        currentMonthTransactions.filter { it.category == category }.sumOf { it.amount }
-    }.filter { it.value > 0 }.toList().sortedByDescending { it.second }
-
-    val totalBudget = if (budgetEnabled) budgets.values.sum() else 0.0
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         item {
-            Text("Monthly Overview", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Spending Trends", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Compare your spending patterns over time.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            
             Spacer(modifier = Modifier.height(16.dp))
             
-            // Overall Spending Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Total Spent (This Month)", style = MaterialTheme.typography.bodyMedium)
-                    Text("₹${String.format("%.2f", totalSpent)}", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                    
-                    if (budgetEnabled && totalBudget > 0) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Overall Budget: ₹${String.format("%.2f", totalBudget)}", style = MaterialTheme.typography.bodySmall)
-                        LinearProgressIndicator(
-                            progress = { (totalSpent / totalBudget).toFloat().coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
-                            color = if (totalSpent > totalBudget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
-                        )
+            TrendControls(
+                granularity = granularity,
+                onGranularityChange = { granularity = it },
+                periodCount = periodCount,
+                onPeriodCountChange = { periodCount = it },
+                selectedCategory = selectedCategoryForChart,
+                onCategoryChange = { selectedCategoryForChart = it },
+                categories = listOf("All") + categories
+            )
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            if (chartData.isNotEmpty()) {
+                SpendingTrendChart(data = chartData, budgetEnabled = budgetEnabled)
+            } else {
+                Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
+                    Text("No transaction data for this period.", color = MaterialTheme.colorScheme.outline)
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(32.dp))
+            Text("Category Breakdown (Past Periods)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        items(categories) { category ->
+            val catData = remember(transactions, granularity, periodCount, category, budgets, budgetEnabled) {
+                prepareChartData(transactions, granularity, periodCount, category, budgets, budgetEnabled)
+            }
+            CategoryTrendCard(
+                category = category,
+                data = catData,
+                budget = budgets[category] ?: 0.0,
+                budgetEnabled = budgetEnabled
+            )
+        }
+    }
+}
+
+@Composable
+fun CategoryTrendCard(category: String, data: List<ChartDataPoint>, budget: Double, budgetEnabled: Boolean) {
+    val totalSpent = data.sumOf { it.amount }
+    val overPeriods = data.count { it.isOver }
+
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(category, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                if (budgetEnabled && budget > 0) {
+                    Text("Limit: ₹${budget.toInt()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("Total (Visible Period)", style = MaterialTheme.typography.labelSmall)
+                    Text("₹${String.format("%.2f", totalSpent)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                }
+                if (budgetEnabled && overPeriods > 0) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("Budget Exceeded", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                        Text("$overPeriods times", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     }
                 }
             }
             
-            Spacer(modifier = Modifier.height(24.dp))
-            Text("Category Breakdown", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
-        if (categoryTotals.isEmpty()) {
-            item {
-                Text("No transactions recorded for this month.", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.outline)
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Mini sparkline-like bar chart
+            Row(modifier = Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                val maxVal = (data.maxOfOrNull { it.amount } ?: 1.0).coerceAtLeast(1.0)
+                data.forEach { point ->
+                    val heightFactor = (point.amount / maxVal).toFloat().coerceIn(0.05f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(heightFactor)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(if (point.isOver) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
-        } else {
-            items(categoryTotals) { (category, amount) ->
-                val percentageOfTotal = if (totalSpent > 0) (amount / totalSpent) else 0.0
-                val budget = if (budgetEnabled) budgets[category] ?: 0.0 else 0.0
+        }
+    }
+}
+
+@Composable
+fun SpendingTrendChart(data: List<ChartDataPoint>, budgetEnabled: Boolean) {
+    val maxVal = (data.maxOfOrNull { maxOf(it.amount, it.budget) } ?: 100.0).coerceAtLeast(10.0) * 1.2
+    val barColor = MaterialTheme.colorScheme.primary
+    val overBudgetColor = MaterialTheme.colorScheme.error
+    val budgetLineColor = MaterialTheme.colorScheme.secondary
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+
+    Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(8.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Canvas(modifier = Modifier.width((data.size * 70).dp).fillMaxHeight()) {
+                val canvasWidth = size.width
+                val canvasHeight = size.height - 40.dp.toPx() // Reserve space for X-axis labels
+                val barWidth = 40.dp.toPx()
+                val spacing = 30.dp.toPx()
                 
-                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(category, fontWeight = FontWeight.SemiBold)
-                        Text("₹${String.format("%.2f", amount)} (${String.format("%.1f", percentageOfTotal * 100)}%)")
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
+                // Draw Grid lines and Y-axis labels
+                val gridSteps = 4
+                for (i in 0..gridSteps) {
+                    val y = canvasHeight - (i.toFloat() / gridSteps * canvasHeight)
+                    val labelVal = (i.toFloat() / gridSteps * maxVal).toInt()
                     
-                    // Progress bar showing relative share of total spending
-                    LinearProgressIndicator(
-                        progress = { percentageOfTotal.toFloat() },
-                        modifier = Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp)),
-                        color = MaterialTheme.colorScheme.secondary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(0f, y),
+                        end = Offset(canvasWidth, y),
+                        strokeWidth = 1f
                     )
                     
-                    if (budget > 0) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        val isOver = amount > budget
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(
-                                "Budget: ₹${String.format("%.2f", budget)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                            Text(
-                                if (isOver) "Over by ₹${String.format("%.2f", amount - budget)}" 
-                                else "${String.format("%.0f", (amount / budget) * 100)}% of budget",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isOver) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                            )
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            color = textColor.copy(alpha = 0.5f).hashCode()
+                            textSize = 10.sp.toPx()
+                        }
+                        drawText("₹$labelVal", 5.dp.toPx(), y - 2.dp.toPx(), paint)
+                    }
+                }
+
+                data.forEachIndexed { index, point ->
+                    val x = spacing + index * (barWidth + spacing)
+                    val barHeight = (point.amount / maxVal * canvasHeight).toFloat()
+                    
+                    // Draw budget line if set
+                    if (budgetEnabled && point.budget > 0) {
+                        val budgetY = canvasHeight - (point.budget / maxVal * canvasHeight).toFloat()
+                        drawLine(
+                            color = budgetLineColor,
+                            start = Offset(x - spacing/2, budgetY),
+                            end = Offset(x + barWidth + spacing/2, budgetY),
+                            strokeWidth = 3f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 10f), 0f)
+                        )
+                    }
+                    
+                    // Draw bar
+                    drawRoundRect(
+                        color = if (point.isOver) overBudgetColor else barColor,
+                        topLeft = Offset(x, canvasHeight - barHeight),
+                        size = Size(barWidth, barHeight),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx())
+                    )
+                    
+                    // Draw "OVER" indicator
+                    if (point.isOver) {
+                        drawContext.canvas.nativeCanvas.apply {
+                            val paint = android.graphics.Paint().apply {
+                                color = overBudgetColor.hashCode()
+                                textAlign = android.graphics.Paint.Align.CENTER
+                                textSize = 10.sp.toPx()
+                                isFakeBoldText = true
+                            }
+                            drawText("OVER", x + barWidth / 2, canvasHeight - barHeight - 15.dp.toPx(), paint)
                         }
                     }
+
+                    // Draw labels
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            color = textColor.hashCode()
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 10.sp.toPx()
+                        }
+                        drawText(point.label, x + barWidth / 2, canvasHeight + 25.dp.toPx(), paint)
+                        
+                        if (point.amount > 0) {
+                            drawText("₹${point.amount.toInt()}", x + barWidth / 2, canvasHeight - barHeight - 5.dp.toPx(), paint)
+                        }
+                    }
+                }
+                
+                // Draw baseline
+                drawLine(
+                    color = textColor,
+                    start = Offset(0f, canvasHeight),
+                    end = Offset(canvasWidth, canvasHeight),
+                    strokeWidth = 2f
+                )
+            }
+        }
+        
+        if (budgetEnabled) {
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(12.dp, 2.dp).background(budgetLineColor))
+                Text(" Budget Limit", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(end = 16.dp))
+                Box(modifier = Modifier.size(12.dp).background(overBudgetColor))
+                Text(" Over Budget", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+private fun prepareChartData(
+    transactions: List<Transaction>,
+    granularity: TimeGranularity,
+    periodCount: Int,
+    selectedCategory: String,
+    budgets: Map<String, Double>,
+    budgetEnabled: Boolean
+): List<ChartDataPoint> {
+    val dataPoints = mutableListOf<ChartDataPoint>()
+    val filteredTransactions = if (selectedCategory == "All") transactions else transactions.filter { it.category == selectedCategory }
+
+    val dateFormat = when (granularity) {
+        TimeGranularity.DAILY -> SimpleDateFormat("dd MMM", Locale.getDefault())
+        TimeGranularity.WEEKLY -> SimpleDateFormat("'W'w", Locale.getDefault())
+        TimeGranularity.MONTHLY -> SimpleDateFormat("MMM", Locale.getDefault())
+        TimeGranularity.YEARLY -> SimpleDateFormat("yyyy", Locale.getDefault())
+    }
+
+    for (i in (periodCount - 1) downTo 0) {
+        val currentCal = Calendar.getInstance()
+        when (granularity) {
+            TimeGranularity.DAILY -> currentCal.add(Calendar.DAY_OF_YEAR, -i)
+            TimeGranularity.WEEKLY -> currentCal.add(Calendar.WEEK_OF_YEAR, -i)
+            TimeGranularity.MONTHLY -> currentCal.add(Calendar.MONTH, -i)
+            TimeGranularity.YEARLY -> currentCal.add(Calendar.YEAR, -i)
+        }
+        
+        val startOfPeriod = getStartOfPeriod(currentCal, granularity)
+        val endOfPeriod = getEndOfPeriod(currentCal, granularity)
+        
+        val periodSpent = filteredTransactions.filter { it.timestamp in startOfPeriod..endOfPeriod }.sumOf { it.amount }
+        
+        var periodBudget = 0.0
+        if (budgetEnabled) {
+            val fullBudget = if (selectedCategory == "All") budgets.values.sum() else budgets[selectedCategory] ?: 0.0
+            periodBudget = when (granularity) {
+                TimeGranularity.DAILY -> fullBudget / 30.0
+                TimeGranularity.WEEKLY -> fullBudget / 4.0
+                TimeGranularity.MONTHLY -> fullBudget
+                TimeGranularity.YEARLY -> fullBudget * 12.0
+            }
+        }
+        
+        dataPoints.add(
+            ChartDataPoint(
+                label = dateFormat.format(currentCal.time),
+                amount = periodSpent,
+                budget = periodBudget,
+                date = currentCal.time,
+                isOver = periodBudget > 0 && periodSpent > periodBudget
+            )
+        )
+    }
+    return dataPoints
+}
+
+private fun getStartOfPeriod(cal: Calendar, granularity: TimeGranularity): Long {
+    val temp = cal.clone() as Calendar
+    when (granularity) {
+        TimeGranularity.DAILY -> {}
+        TimeGranularity.WEEKLY -> temp.set(Calendar.DAY_OF_WEEK, temp.firstDayOfWeek)
+        TimeGranularity.MONTHLY -> temp.set(Calendar.DAY_OF_MONTH, 1)
+        TimeGranularity.YEARLY -> temp.set(Calendar.DAY_OF_YEAR, 1)
+    }
+    temp.set(Calendar.HOUR_OF_DAY, 0)
+    temp.set(Calendar.MINUTE, 0)
+    temp.set(Calendar.SECOND, 0)
+    temp.set(Calendar.MILLISECOND, 0)
+    return temp.timeInMillis
+}
+
+private fun getEndOfPeriod(cal: Calendar, granularity: TimeGranularity): Long {
+    val temp = cal.clone() as Calendar
+    when (granularity) {
+        TimeGranularity.DAILY -> {}
+        TimeGranularity.WEEKLY -> {
+            temp.set(Calendar.DAY_OF_WEEK, temp.firstDayOfWeek)
+            temp.add(Calendar.DAY_OF_YEAR, 6)
+        }
+        TimeGranularity.MONTHLY -> temp.set(Calendar.DAY_OF_MONTH, temp.getActualMaximum(Calendar.DAY_OF_MONTH))
+        TimeGranularity.YEARLY -> temp.set(Calendar.DAY_OF_YEAR, temp.getActualMaximum(Calendar.DAY_OF_YEAR))
+    }
+    temp.set(Calendar.HOUR_OF_DAY, 23)
+    temp.set(Calendar.MINUTE, 59)
+    temp.set(Calendar.SECOND, 59)
+    temp.set(Calendar.MILLISECOND, 999)
+    return temp.timeInMillis
+}
+
+@Composable
+fun TrendControls(
+    granularity: TimeGranularity,
+    onGranularityChange: (TimeGranularity) -> Unit,
+    periodCount: Int,
+    onPeriodCountChange: (Int) -> Unit,
+    selectedCategory: String,
+    onCategoryChange: (String) -> Unit,
+    categories: List<String>
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TimeGranularity.values().forEach { g ->
+                FilterChip(
+                    selected = granularity == g,
+                    onClick = { onGranularityChange(g) },
+                    label = { Text(g.name.lowercase().replaceFirstChar { it.uppercase() }, fontSize = 10.sp) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Periods: ", style = MaterialTheme.typography.labelSmall)
+            Slider(
+                value = periodCount.toFloat(),
+                onValueChange = { onPeriodCountChange(it.toInt()) },
+                valueRange = 2f..24f,
+                steps = 22,
+                modifier = Modifier.weight(1f)
+            )
+            Text("$periodCount", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(30.dp), textAlign = TextAlign.End)
+        }
+        
+        var expanded by remember { mutableStateOf(false) }
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Icon(Icons.Default.List, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Category: $selectedCategory")
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                categories.forEach { category ->
+                    DropdownMenuItem(
+                        text = { Text(category) },
+                        onClick = {
+                            onCategoryChange(category)
+                            expanded = false
+                        }
+                    )
                 }
             }
         }
@@ -434,7 +726,7 @@ fun CategorySummaryScreen(refreshTrigger: Int, onCategoryClick: (String) -> Unit
                         Spacer(modifier = Modifier.height(8.dp))
                         LinearProgressIndicator(
                             progress = { (total / budget).toFloat().coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
                             color = if (isOverBudget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                             trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
                         )
@@ -505,7 +797,6 @@ fun NotificationHistoryScreen(refreshTrigger: Int, onItemClick: (NotificationHis
             items(history) { item ->
                 val isPending = item.status == NotificationStatus.PENDING
                 val isMissed = !item.isAuto && item.status == NotificationStatus.DISMISSED
-                val requiresAction = !item.isAuto && item.status != NotificationStatus.CATEGORIZED
 
                 Card(
                     modifier = Modifier
@@ -748,7 +1039,7 @@ fun CategoryManagementPage(prefs: PreferencesManager, onRefresh: () -> Unit) {
                     if (allCategories.size > 1) {
                         categoryToDelete = it
                     } else {
-                        // Toast or something to say at least one category must exist
+                        Toast.makeText(prefs.getContext(), "At least one category must exist.", Toast.LENGTH_SHORT).show()
                     }
                 }
             )
@@ -1225,7 +1516,7 @@ fun TransactionCategorizationDialog(
                                         onDismiss()
                                     }
                                 ) {
-                                    Text(category, fontSize = 12.sp, maxLines = 1, color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                                    Text(category, fontSize = 12.sp, maxLines = 1)
                                 }
                             }
                             if (rowCategories.size == 1) {
@@ -1242,4 +1533,13 @@ fun TransactionCategorizationDialog(
             }
         }
     )
+}
+
+fun PreferencesManager.getContext(): Context {
+    // This is a hack because PreferenceManager doesn't expose context. 
+    // In a real app, you'd handle this better.
+    return (this::class.java.getDeclaredField("sharedPreferences").let {
+        it.isAccessible = true
+        (it.get(this) as android.content.SharedPreferences)
+    } as? android.content.Context) ?: throw IllegalStateException("Context not found")
 }
