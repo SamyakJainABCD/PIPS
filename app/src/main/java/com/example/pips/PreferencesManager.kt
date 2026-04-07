@@ -150,8 +150,14 @@ class PreferencesManager(context: Context) {
         sharedPreferences.edit().putString(KEY_NOTIFICATION_HISTORY, json).apply()
     }
 
-    fun getMissedNotificationsCount(): Int {
-        return getNotificationHistory().count { !it.isAuto && it.status == NotificationStatus.DISMISSED && !it.isSeen }
+    /**
+     * Returns the count of manual notifications that have not been categorized yet 
+     * and haven't been "seen" in the history page.
+     */
+    fun getActionRequiredCount(): Int {
+        return getNotificationHistory().count { 
+            !it.isAuto && it.status != NotificationStatus.CATEGORIZED && !it.isSeen 
+        }
     }
 
     fun getBudgets(): Map<String, Double> {
@@ -233,8 +239,7 @@ class PreferencesManager(context: Context) {
         categories.remove(oldCategory)
         setAllCategories(categories)
 
-        // 5. Remove Budget for oldCategory (or transfer? The request says "transfer contents", 
-        // usually refers to transactions, but let's keep it simple and just delete the old budget)
+        // 5. Remove Budget for oldCategory
         removeBudget(oldCategory)
     }
 }

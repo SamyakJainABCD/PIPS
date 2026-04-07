@@ -15,11 +15,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,6 +30,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -83,7 +87,7 @@ class MainActivity : ComponentActivity() {
 
                 val context = LocalContext.current
                 val prefs = remember { PreferencesManager(context) }
-                val missedCount = remember(refresh) { prefs.getMissedNotificationsCount() }
+                val actionRequiredCount = remember(refresh) { prefs.getActionRequiredCount() }
 
                 LaunchedEffect(openUpiSettings) {
                     if (openUpiSettings != null) {
@@ -123,17 +127,26 @@ class MainActivity : ComponentActivity() {
                                 }
 
                                 Text(
-                                    text = if (settingsSubScreen != null) settingsSubScreen!!.replace("_", " ").replaceFirstChar { it.uppercase() } else "PIPS - UPI Tracker",
+                                    text = when {
+                                        settingsSubScreen != null -> settingsSubScreen!!.replace("_", " ").replaceFirstChar { it.uppercase() }
+                                        currentScreen == "analytics" -> "Spending Analytics"
+                                        currentScreen == "notifications" -> "Notification History"
+                                        currentScreen == "settings" -> "Settings"
+                                        else -> "PIPS - UPI Tracker"
+                                    },
                                     modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.titleLarge,
                                     textAlign = TextAlign.Center
                                 )
 
                                 if (currentScreen == "summary") {
+                                    IconButton(onClick = { currentScreen = "analytics" }) {
+                                        Icon(Icons.Default.Info, contentDescription = "Analytics")
+                                    }
                                     BadgedBox(
                                         badge = {
-                                            if (missedCount > 0) {
-                                                Badge { Text(missedCount.toString()) }
+                                            if (actionRequiredCount > 0) {
+                                                Badge { Text(actionRequiredCount.toString()) }
                                             }
                                         }
                                     ) {
@@ -160,6 +173,7 @@ class MainActivity : ComponentActivity() {
                                     refreshTrigger = refresh,
                                     onCategoryClick = { selectedCategoryForHistory = it }
                                 )
+                                "analytics" -> AnalyticsScreen(refreshTrigger = refresh)
                                 "settings" -> SettingsScreen(
                                     subScreen = settingsSubScreen,
                                     onNavigateToSub = { settingsSubScreen = it },
@@ -245,6 +259,111 @@ class MainActivity : ComponentActivity() {
             }
             if (it.hasExtra("open_upi_settings")) {
                 openUpiSettingsState.value = it.getStringExtra("open_upi_settings")
+            }
+        }
+    }
+}
+
+@Composable
+fun AnalyticsScreen(refreshTrigger: Int) {
+    val context = LocalContext.current
+    val prefs = remember { PreferencesManager(context) }
+    
+    val transactions = remember(refreshTrigger) { prefs.getTransactions() }
+    val categories = remember(refreshTrigger) { prefs.getAllCategories() }
+    val budgets = remember(refreshTrigger) { prefs.getBudgets() }
+    val budgetEnabled = remember(refreshTrigger) { prefs.isBudgetEnabled() }
+
+    val calendar = Calendar.getInstance()
+    val currentMonth = calendar.get(Calendar.MONTH)
+    val currentYear = calendar.get(Calendar.YEAR)
+
+    val currentMonthTransactions = transactions.filter {
+        val transCal = Calendar.getInstance().apply { timeInMillis = it.timestamp }
+        transCal.get(Calendar.MONTH) == currentMonth && transCal.get(Calendar.YEAR) == currentYear
+    }
+
+    val totalSpent = currentMonthTransactions.sumOf { it.amount }
+    val categoryTotals = categories.associateWith { category ->
+        currentMonthTransactions.filter { it.category == category }.sumOf { it.amount }
+    }.filter { it.value > 0 }.toList().sortedByDescending { it.second }
+
+    val totalBudget = if (budgetEnabled) budgets.values.sum() else 0.0
+
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        item {
+            Text("Monthly Overview", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Overall Spending Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Total Spent (This Month)", style = MaterialTheme.typography.bodyMedium)
+                    Text("₹${String.format("%.2f", totalSpent)}", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    
+                    if (budgetEnabled && totalBudget > 0) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Overall Budget: ₹${String.format("%.2f", totalBudget)}", style = MaterialTheme.typography.bodySmall)
+                        LinearProgressIndicator(
+                            progress = { (totalSpent / totalBudget).toFloat().coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                            color = if (totalSpent > totalBudget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("Category Breakdown", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        if (categoryTotals.isEmpty()) {
+            item {
+                Text("No transactions recorded for this month.", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.outline)
+            }
+        } else {
+            items(categoryTotals) { (category, amount) ->
+                val percentageOfTotal = if (totalSpent > 0) (amount / totalSpent) else 0.0
+                val budget = if (budgetEnabled) budgets[category] ?: 0.0 else 0.0
+                
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(category, fontWeight = FontWeight.SemiBold)
+                        Text("₹${String.format("%.2f", amount)} (${String.format("%.1f", percentageOfTotal * 100)}%)")
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // Progress bar showing relative share of total spending
+                    LinearProgressIndicator(
+                        progress = { percentageOfTotal.toFloat() },
+                        modifier = Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp)),
+                        color = MaterialTheme.colorScheme.secondary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    
+                    if (budget > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val isOver = amount > budget
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(
+                                "Budget: ₹${String.format("%.2f", budget)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                            Text(
+                                if (isOver) "Over by ₹${String.format("%.2f", amount - budget)}" 
+                                else "${String.format("%.0f", (amount / budget) * 100)}% of budget",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isOver) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -384,15 +503,21 @@ fun NotificationHistoryScreen(refreshTrigger: Int, onItemClick: (NotificationHis
             }
         } else {
             items(history) { item ->
+                val isPending = item.status == NotificationStatus.PENDING
                 val isMissed = !item.isAuto && item.status == NotificationStatus.DISMISSED
+                val requiresAction = !item.isAuto && item.status != NotificationStatus.CATEGORIZED
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                         .clickable { onItemClick(item) },
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isMissed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f) 
-                                         else MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = when {
+                            isPending -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                            isMissed -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        }
                     )
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -412,7 +537,11 @@ fun NotificationHistoryScreen(refreshTrigger: Int, onItemClick: (NotificationHis
                                 statusText,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold,
-                                color = if (isMissed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
+                                color = when {
+                                    isPending -> MaterialTheme.colorScheme.primary
+                                    isMissed -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.outline
+                                }
                             )
                             Text(
                                 dateFormat.format(Date(item.timestamp)),

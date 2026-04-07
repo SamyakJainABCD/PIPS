@@ -105,7 +105,6 @@ class SmsReceiver : BroadcastReceiver() {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(contentPendingIntent)
             .setAutoCancel(true)
-            .setOngoing(false)
 
         with(NotificationManagerCompat.from(context)) {
             try {
