@@ -12,6 +12,7 @@ class CategoryActionReceiver : BroadcastReceiver() {
         val notificationId = intent.getIntExtra("notification_id", -1)
         val transactionDetails = intent.getStringExtra("transaction_details")
         val accountName = intent.getStringExtra("account_name") ?: "Unknown"
+        val notificationUuid = intent.getStringExtra("notification_uuid")
 
         if (category != null && notificationId != -1 && transactionDetails != null) {
             val prefs = PreferencesManager(context)
@@ -27,6 +28,16 @@ class CategoryActionReceiver : BroadcastReceiver() {
             )
             
             prefs.saveTransaction(transaction)
+
+            // Update notification history status
+            if (notificationUuid != null) {
+                prefs.updateNotificationStatus(notificationUuid, NotificationStatus.CATEGORIZED, category)
+            }
+
+            // Notify MainActivity to refresh its data
+            val updateIntent = Intent("com.example.pips.UPDATE_TRANSACTIONS")
+            updateIntent.setPackage(context.packageName)
+            context.sendBroadcast(updateIntent)
 
             // Dismiss the notification
             NotificationManagerCompat.from(context).cancel(notificationId)
